@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tigris Analysis Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { background-color: #0f172a; color: #f1f5f9; font-family: sans-serif; }
+    .card { background-color: #1e293b; border-radius: 0.5rem; padding: 1.25rem; margin-bottom: 1rem; }
+    .title { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .tab-button { padding: 0.5rem 1rem; border-radius: 0.375rem; margin-right: 1rem; background-color: #334155; color: #f8fafc; }
+    .tab-button.active { background-color: #0ea5e9; }
+    .hidden { display: none; }
+    canvas { background-color: #1e293b; border-radius: 0.5rem; }
+    input, select { color: black; }
+    .metric-card { background-color: #1e293b; border-radius: 0.5rem; padding: 1rem; text-align: center; }
+    .metric-title { font-size: 0.9rem; color: #94a3b8; }
+    .metric-value { font-size: 1.5rem; font-weight: bold; }
+    table th, table td { padding: 0.5rem; border-bottom: 1px solid #334155; }
+    .text-green { color: #22c55e; }
+    .text-red { color: #ef4444; }
+  </style>
+</head>
+<body>
+  <div class="flex justify-between items-center mb-4">
+    <h1 class="text-2xl font-bold">Tigris Analysis Dashboard</h1>
+    <div>
+      <input type="file" id="uploadExcel" accept=".xlsx" class="mb-2 text-sm" />
+      <button onclick="downloadPDF()" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded">
+        📥 Export PDF Report
+      </button>
+    </div>
+  </div>
+
+  <div class="mb-6">
+    <button class="tab-button active" onclick="showTab('overview', this)">Overview</button>
+    <button class="tab-button" onclick="showTab('trends', this)">Trends</button>
+    <button class="tab-button" onclick="showTab('products', this)">Products</button>
+    <button class="tab-button" onclick="showTab('comparison', this)">Comparison</button>
+  </div>
+
+  <div id="tab-overview" class="tab-content">
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4" id="overviewCards"></div>
+    <div class="card">
+      <div class="title">Revenue by Brand</div>
+      <canvas id="brandChart"></canvas>
+    </div>
+  </div>
+
+  <div id="tab-trends" class="tab-content hidden">
+    <div class="card">
+      <div class="title">Weekly Trends</div>
+      <canvas id="trendChart"></canvas>
+      <div id="trendOutliers" class="mt-4 text-sm"></div>
+    </div>
+  </div>
+
+  <div id="tab-products" class="tab-content hidden">
+    <div class="card">
+      <div class="title">Top Products</div>
+      <div id="productTable" class="overflow-auto max-h-[500px] text-sm"></div>
+    </div>
+  </div>
+
+  <div id="tab-comparison" class="tab-content hidden">
+    <div class="card">
+      <div class="title">Compare Two Date Ranges</div>
+      <div class="mb-4 grid grid-cols-2 gap-4">
+        <div>
+          <label>Start A: <input type="date" id="startA" class="rounded p-1" /></label>
+          <label class="ml-2">End A: <input type="date" id="endA" class="rounded p-1" /></label>
+        </div>
+        <div>
+          <label>Start B: <input type="date" id="startB" class="rounded p-1" /></label>
+          <label class="ml-2">End B: <input type="date" id="endB" class="rounded p-1" /></label>
+        </div>
+      </div>
+      <button onclick="renderComparison()" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded">Compare</button>
+      <div id="comparisonResults" class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+    </div>
+  </div>
+<script>
+let dashboardData = [];
+let brandChart = null;
+let trendChart = null;
+
+function excelDateToJSDate(serial) {
+  if (typeof serial === "number") {
+    const utc_days = Math.floor(serial - 25569);
+    const utc_value = utc_days * 86400;
+    return new Date(utc_value * 1000);
+  } else {
+    const parsed = Date.parse(serial);
+    return isNaN(parsed) ? new Date() : new Date(parsed);
+  }
+}
+
+function showTab(tab, button) {
+  document.querySelectorAll(".tab-content").forEach(div => div.classList.add("hidden"));
+  document.querySelectorAll(".tab-button").forEach(btn => btn.classList.remove("active"));
+  document.getElementById("tab-" + tab).classList.remove("hidden");
+  button.classList.add("active");
+}
+
+function downloadPDF() {
+  html2pdf().from(document.body).save("tigris_report.pdf");
+}
+
+function parseExcel(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const data = new Uint8Array(e.target.result);
+    const workbook = XLSX.read(data, { type: 'array' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const json = XLSX.utils.sheet_to_json(sheet);
+    dashboardData = json.map(row => {
+      const brand = row.Product ? row.Product.split(" ")[0].toUpperCase() : "UNKNOWN";
+      return {
+        PID: row.PID,
+        Product: row.Product,
+        Brand: brand,
+        Amount: parseFloat(row["Amount......"]) || 0,
+        Cost: parseFloat(row["Cost"]) || 0,
+        GP_Dollar: parseFloat(row["GP$"]) || 0,
+        GP_Percent: parseFloat(row["GP%"]) || 0,
+        Shipped: parseFloat(row["Shipped"]) || 0,
+        Invoice: row["Invoice#"],
+        ShipDate: excelDateToJSDate(row["ShipDate"])
+      };
+    });
+    renderDashboard();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+document.getElementById("uploadExcel").addEventListener("change", function(e) {
+  const file = e.target.files[0];
+  if (file) parseExcel(file);
+});
+</script>
+<script>
+function renderDashboard() {
+  renderOverview();
+  renderBrandChart();
+  renderTrends();
+  renderProductTable();
+}
+
+function renderOverview() {
+  const totalRevenue = dashboardData.reduce((sum, r) => sum + r.Amount, 0);
+  const totalUnits = dashboardData.reduce((sum, r) => sum + r.Shipped, 0);
+  const totalCost = dashboardData.reduce((sum, r) => sum + r.Cost, 0);
+  const totalGP = totalRevenue ? (((totalRevenue - totalCost) / totalRevenue) * 100).toFixed(1) : 0;
+  const uniqueOrders = new Set(dashboardData.map(r => r.Invoice)).size;
+
+  document.getElementById("overviewCards").innerHTML = `
+    <div class="metric-card"><div class="metric-title">Revenue</div><div class="metric-value">$${totalRevenue.toFixed(2)}</div></div>
+    <div class="metric-card"><div class="metric-title">Units Shipped</div><div class="metric-value">${totalUnits}</div></div>
+    <div class="metric-card"><div class="metric-title">Avg GP%</div><div class="metric-value">${totalGP}%</div></div>
+    <div class="metric-card"><div class="metric-title">Unique Orders</div><div class="metric-value">${uniqueOrders}</div></div>
+  `;
+}
+
+function renderBrandChart() {
+  const grouped = {};
+  dashboardData.forEach(r => {
+    if (!grouped[r.Brand]) grouped[r.Brand] = 0;
+    grouped[r.Brand] += r.Amount;
+  });
+  const labels = Object.keys(grouped);
+  const values = labels.map(k => grouped[k]);
+
+  if (brandChart) brandChart.destroy();
+  brandChart = new Chart(document.getElementById("brandChart"), {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Revenue",
+        data: values,
+        backgroundColor: "#38bdf8"
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: "#fff" } } },
+      scales: {
+        x: { ticks: { color: "#fff" } },
+        y: { ticks: { color: "#fff" } }
+      }
+    }
+  });
+}
+
+function renderTrends() {
+  const byDate = {};
+  dashboardData.forEach(r => {
+    const key = r.ShipDate.toISOString().split('T')[0];
+    if (!byDate[key]) byDate[key] = { units: 0, rev: 0, cost: 0 };
+    byDate[key].units += r.Shipped;
+    byDate[key].rev += r.Amount;
+    byDate[key].cost += r.Cost;
+  });
+
+  const labels = Object.keys(byDate).sort();
+  const data = labels.map(k => byDate[k]);
+
+  const outliers = labels.filter((k, i) => {
+    const d = data[i];
+    return d.cost > d.rev * 1.1 || d.rev > d.cost * 1.1;
+  });
+
+  document.getElementById("trendOutliers").innerHTML = `
+    <strong>Outlier Days:</strong>
+    <ul class="list-disc ml-4">${outliers.map(k => `<li>${k}: Cost $${byDate[k].cost.toFixed(2)} vs Revenue $${byDate[k].rev.toFixed(2)}</li>`).join("")}</ul>
+  `;
+
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(document.getElementById("trendChart"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        { label: "Units", data: data.map(d => d.units), borderColor: "#0ea5e9", tension: 0.4 },
+        { label: "Revenue", data: data.map(d => d.rev), borderColor: "#22c55e", fill: { target: 'origin', above: "#22c55e33" }, tension: 0.4 },
+        { label: "Cost", data: data.map(d => d.cost), borderColor: "#f97316", fill: { target: 'origin', above: "#f9731633" }, tension: 0.4 }
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: "#fff" } } },
+      scales: {
+        x: { ticks: { color: "#fff" } },
+        y: { ticks: { color: "#fff" } }
+      }
+    }
+  });
+}
+
+function renderProductTable() {
+  const grouped = {};
+  dashboardData.forEach(r => {
+    const key = r.PID;
+    if (!grouped[key]) grouped[key] = { product: r.Product, units: 0, rev: 0 };
+    grouped[key].units += r.Shipped;
+    grouped[key].rev += r.Amount;
+  });
+  const rows = Object.entries(grouped).sort((a, b) => b[1].rev - a[1].rev).slice(0, 25);
+  let html = "<table class='w-full'><thead><tr><th class='text-left'>PID</th><th>Product</th><th>Units</th><th>Revenue</th></tr></thead><tbody>";
+  rows.forEach(([pid, data]) => {
+    html += `<tr><td class='pr-2'>${pid}</td><td>${data.product}</td><td class='text-center'>${data.units}</td><td class='text-center'>$${data.rev.toFixed(2)}</td></tr>`;
+  });
+  html += "</tbody></table>";
+  document.getElementById("productTable").innerHTML = html;
+}
+</script>
+<script>
+function renderComparison() {
+  const startA = new Date(document.getElementById("startA").value);
+  const endA = new Date(document.getElementById("endA").value);
+  const startB = new Date(document.getElementById("startB").value);
+  const endB = new Date(document.getElementById("endB").value);
+
+  const rangeA = dashboardData.filter(r => r.ShipDate >= startA && r.ShipDate <= endA);
+  const rangeB = dashboardData.filter(r => r.ShipDate >= startB && r.ShipDate <= endB);
+
+  const summarize = (data) => {
+    const summary = { rev: 0, units: 0, gp: 0, products: {}, dates: {} };
+    data.forEach(r => {
+      summary.rev += r.Amount;
+      summary.units += r.Shipped;
+      summary.gp += r.GP_Dollar;
+
+      if (!summary.products[r.PID]) summary.products[r.PID] = { name: r.Product, rev: 0 };
+      summary.products[r.PID].rev += r.Amount;
+
+      const date = r.ShipDate.toISOString().split("T")[0];
+      if (!summary.dates[date]) summary.dates[date] = { rev: 0, cost: 0 };
+      summary.dates[date].rev += r.Amount;
+      summary.dates[date].cost += r.Cost;
+    });
+
+    summary.topProducts = Object.entries(summary.products)
+      .sort((a, b) => b[1].rev - a[1].rev)
+      .slice(0, 5)
+      .map(([pid, { name, rev }]) => `<li>${pid} - ${name} - $${rev.toFixed(2)}</li>`);
+
+    summary.outliers = Object.entries(summary.dates)
+      .filter(([_, val]) => val.cost > val.rev * 1.1 || val.rev > val.cost * 1.1)
+      .map(([d, val]) => `<li>${d}: Cost $${val.cost.toFixed(2)} vs Rev $${val.rev.toFixed(2)}</li>`);
+
+    summary.gpPct = summary.rev ? (summary.gp / summary.rev * 100).toFixed(1) : 0;
+    return summary;
+  };
+
+  const A = summarize(rangeA);
+  const B = summarize(rangeB);
+
+  const delta = (a, b) => {
+    const diff = b - a;
+    const pct = a ? (diff / a * 100).toFixed(1) : "n/a";
+    const color = diff >= 0 ? "text-green-400" : "text-red-400";
+    return `<span class="${color}">${diff.toFixed(2)} (${pct}%)</span>`;
+  };
+
+  document.getElementById("comparisonResults").innerHTML = `
+    <div class="bg-gray-800 p-4 rounded">
+      <h3 class="text-lg font-bold mb-2">📅 Timeframe A (${startA.toDateString()} - ${endA.toDateString()})</h3>
+      <ul class="mb-2">
+        <li><strong>Revenue:</strong> $${A.rev.toFixed(2)}</li>
+        <li><strong>Units:</strong> ${A.units}</li>
+        <li><strong>GP$:</strong> $${A.gp.toFixed(2)}</li>
+        <li><strong>GP%:</strong> ${A.gpPct}%</li>
+      </ul>
+      <div class="mb-2"><strong>Top Products:</strong><ul class="list-disc ml-4">${A.topProducts.join("")}</ul></div>
+      <div><strong>Outlier Days:</strong><ul class="list-disc ml-4">${A.outliers.join("")}</ul></div>
+    </div>
+
+    <div class="bg-gray-800 p-4 rounded">
+      <h3 class="text-lg font-bold mb-2">📅 Timeframe B (${startB.toDateString()} - ${endB.toDateString()})</h3>
+      <ul class="mb-2">
+        <li><strong>Revenue:</strong> $${B.rev.toFixed(2)} → ${delta(A.rev, B.rev)}</li>
+        <li><strong>Units:</strong> ${B.units} → ${delta(A.units, B.units)}</li>
+        <li><strong>GP$:</strong> $${B.gp.toFixed(2)} → ${delta(A.gp, B.gp)}</li>
+        <li><strong>GP%:</strong> ${B.gpPct}% → ${delta(parseFloat(A.gpPct), parseFloat(B.gpPct))}</li>
+      </ul>
+      <div class="mb-2"><strong>Top Products:</strong><ul class="list-disc ml-4">${B.topProducts.join("")}</ul></div>
+      <div><strong>Outlier Days:</strong><ul class="list-disc ml-4">${B.outliers.join("")}</ul></div>
+    </div>
+  `;
+}
+</script>
+</body>
+</html>
